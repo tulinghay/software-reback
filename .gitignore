@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# 运行产物：清单与下载结果属于本机数据，不入库
+software.json
+download.json
+download-report.csv
+downloads/

@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "software-reback"
+version = "0.1.0"
+description = "读取 Windows 已安装软件清单，并按清单下载安装包"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+software-reback = "software_reback.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

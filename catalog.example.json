@@ -1,0 +1,23 @@
+{
+  "entries": [
+    {
+      "display_name": "微信",
+      "url": "https://example.com/placeholder/WeChatSetup.exe",
+      "file_name": "WeChatSetup.exe",
+      "sha256": "把官方安装包的真实 SHA256 填在这里",
+      "silent_args": "/S"
+    },
+    {
+      "display_name": "Microsoft Office 专业增强版 2019 - zh-cn",
+      "url": "https://example.com/placeholder/office2019.img",
+      "file_name": "office2019.img",
+      "sha256": "",
+      "silent_args": "/configure config.xml"
+    },
+    {
+      "display_name": "NVIDIA App",
+      "winget_id": "Nvidia.App",
+      "silent_args": "-s"
+    }
+  ]
+}
