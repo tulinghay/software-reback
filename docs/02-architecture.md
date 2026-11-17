@@ -1,7 +1,7 @@
 # 02 架构说明（software-reback-cloud）
 
 > 归属：文档 B（架构 + 接口契约）。本文只描述架构，不改代码、不部署。
-> 基线：`PLAN-SPLIT.md`（硬性约束）、`README.md`（现有 CLI 行为）、`src/software_reback/*.py`（现有实现）。
+> 基线：`PLAN-SPLIT.md`（**已归档**，仅引用其实测事实数据）、`README.md`（现有 CLI 行为）、`src/software_reback/*.py`（现有实现）。
 > 术语沿用统一编号：**M1 读取 / M2 下载 / M3 隔离 / M4 汇总**。
 
 ## 0. 范围（做什么 / 不做什么）

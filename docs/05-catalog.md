@@ -1,7 +1,7 @@
 # 05 · 软件汇总 / 目录维护（M4）
 
 > 服务对象：M1 读取、M2 下载。目录是「补漏入口」，解决 winget 覆盖不到的部分。
-> 定稿依据：`PLAN-SPLIT.md`（统一基线）+ `README.md`（实测覆盖率）+ 本机 winget v1.29.380 实测。
+> 定稿依据：`PLAN-SPLIT.md`（**已归档**，仅引用其实测事实数据）+ `README.md`（实测覆盖率）+ 本机 winget v1.29.380 实测。
 > 仓库内唯一相关代码：`src/software_reback/catalog.py`（现有 `CatalogEntry` 6 个字段、以 `display_name` 归一化为键）。
 
 ## 1. 定位与边界

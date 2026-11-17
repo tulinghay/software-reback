@@ -1,6 +1,6 @@
 # 06 · 客户端强化设计（M1 读取 + M2 下载）
 
-> 前置：`README.md`（现有实现）+ `PLAN-SPLIT.md`（统一基线）。
+> 前置：`README.md`（现有实现）+ `PLAN-SPLIT.md`（**已归档**，仅引用其实测事实数据）。
 > 硬约束：**不重写**，在现有 `cli.py / inventory.py / winget.py / resolver.py / downloader.py / store.py / catalog.py` 上做增量扩展；64 个既有测试必须继续通过。
 > 本文所有数字均来自本机实测（winget **v1.29.380**，可执行文件在 `%LOCALAPPDATA%\Microsoft\WindowsApps\winget.exe`，**不在 PATH 里，必须用全路径调用**）。
 
@@ -157,7 +157,23 @@ parse_list_v2(output, known_ids=E):
 | 列压成单空格 | 现有 `_split_row` 的测试样例行 | 回归通过，行为不变 |
 | 空 Source | 一行以 `MSIX\Microsoft.AV1VideoExtension_2.0.35.0_x64__8wekyb3d8bbwe` 结尾 | `source == ""` 且 `id` 不被截断 |
 | CJK + Source 为空（双重坑） | `豆包`（`ByteDance.Doubao`，Source=`winget`）与 `百度网盘`（`MSIX\…`，Source 空）原行 | 前者 id/channel 正确，后者 id 不被截断 |
-| 全量回归 | 保存本机真实输出为 `tests/fixtures/winget-list-1.29.380.txt` | 153 行、142 个 Id、对 52 个 export ID 命中 **52/52** |
+| 全量回归 | 保存本机真实输出为 `tests/fixtures/winget-list-1.29.380.txt` | **原始 155 行 / 数据 153 行**、142 个 Id、对 52 个 export ID 命中 **52/52** |
+
+#### 2.4.1 解析失败必须可观测（K1 指标的前提）
+
+**这是本节最重要的约束**：K1「覆盖率 ≥90%」完全建立在 `winget list` 解析正确之上，而 `winget list` 是非结构化、无版本契约的定宽文本。若解析失败静默发生，覆盖率会悄悄掉到 40/52 甚至更低，而报告仍显示「成功」。
+
+因此 `parse_list_v2` **必须返回 `(rows, parse_errors)` 二元组，且 `parse_errors` 必须向上传播到清单与报告**：
+
+| 要求 | 具体做法 | 违反后果 |
+|---|---|---|
+| 错误计数必须外露 | `parse_list_v2` 返回 `parse_errors`（行号 + 原因码）；写入清单 `source_summary.parse_errors` 与 `stats.parse_errors` | 解析失败被当成「本机没有这个软件」，K1 失真且无人察觉 |
+| 失败不得静默降级 | 解析出错的行**丢弃并计数**，绝不猜测填充；`parse_errors > 0` 时 `scan` 输出告警并在报告里单列 | 错误数据进入清单，下游下载到错包 |
+| 覆盖率必须带分母 | 报告输出 `identified / total` 与 `parse_errors`，二者同时展示；K1 达标判定需 `parse_errors == 0` | 用「解析失败」冒充「软件未安装」，指标虚高 |
+| 解析器版本必须留痕 | 清单 `client.winget_version` + `client.parser_version` 双记录 | winget 升级导致格式漂移时无法定位是哪一版出的问题 |
+
+> 判定口径：**K1 ≥90% 且 `parse_errors == 0` 才算达标**。若 `parse_errors > 0`，即使覆盖率显示 90%，也视为未达标——因为分母本身不可信。这条是对原设计「只统计 `winget_id` 非空条数」的修正：原口径无法区分「真的没装」与「解析失败没认出来」。
+
 
 ### 2.5 输出清单 schema v2
 
@@ -167,7 +183,7 @@ parse_list_v2(output, known_ids=E):
 {
   "schema_version": 2,
   "generated_at": "2026-11-15T22:35:00+08:00",
-  "client": { "tool_version": "0.2.0", "winget_version": "v1.29.380" },
+  "client": { "tool_version": "0.2.0", "winget_version": "v1.29.380", "parser_version": "list-v2.1" },
   "environment": {
     "os": "Windows 11 Pro 10.0.26100",
     "arch": "x64",
@@ -177,7 +193,7 @@ parse_list_v2(output, known_ids=E):
     "locale": "zh-CN",
     "elevated": false
   },
-  "stats": { "total": 55, "identified": 50, "by_source": { "winget": 50, "registry": 5 } },
+  "stats": { "total": 55, "identified": 50, "by_source": { "winget": 50, "registry": 5 }, "parse_errors": 0 },
   "software": [
     {
       "name": "Notepad++ (64-bit x64)",

@@ -2,7 +2,7 @@
 
 > 本文件是 **功能总纲**：模块编号、功能点编号、优先级、验收标准以本文为准。
 > 后续 `02-architecture.md`、`03-api-contract.md`、`04-isolation.md`、`05-catalog.md`、`06-client.md`、`07-roadmap.md` 必须引用本文编号，不得另立编号体系。
-> 统一前提见 `../PLAN-SPLIT.md`（代码基线 / 云端实测约束 / 隔离双维度 / 只写文档）。
+> 统一前提见 `../PLAN-SPLIT.md`（**已归档**：仅引用其「已确认的前提」中的实测事实数据，任务分派部分已失效）。
 
 ## 1. 一句话定位
 
@@ -26,6 +26,8 @@
 | M3 | 隔离 | 用 account_id + device_id 双维度保证清单只有本人、本机能读写 | P0 | 未实现（本轮新增云端） |
 | M4 | 汇总 | 维护「软件 → 下载来源」目录，补 winget 覆盖不到的部分 | P1 | 只有本地 `catalog.example.json`；需运营化 |
 
+> **客户端 GUI 不在本表**：桌面界面设计见 [`08-client-ui.md`](08-client-ui.md)（`UI-01`~`UI-22` 独立编号，设计定稿、实现延后）。GUI 是**交付形态**而非新功能模块——它的每个能力都对应 M1/M2/M4 中的既有功能点，因此不占用本文件的模块编号。
+
 优先级口径：**P0** = 缺了主流程走不通；**P1** = 主流程可用但体验/可靠性不达标；**P2** = 锦上添花，可延后。
 
 ## 3. 模块 M1 · 读取
@@ -37,7 +39,7 @@
 | M1-01 | 注册表三源读取 | 读 `HKLM\...\Uninstall`、`HKLM\WOW6432Node\...\Uninstall`、`HKCU\...\Uninstall` 三处（与「设置 → 已安装的应用」同源） | P0 | 三条路径各自可独立遍历；任一键缺失时跳过不崩溃；本机样本读出 55 条（去重后） |
 | M1-02 | 安装项过滤 | 丢弃无 `DisplayName`、`SystemComponent=1`、有 `ParentKeyName`（补丁/子项）的条目 | P0 | 单元测试覆盖 3 类过滤各 1 条，均不进入输出；无 `DisplayName` 条目不产生空名记录 |
 | M1-03 | winget export 精确 ID | 用全路径 `%LOCALAPPDATA%\Microsoft\WindowsApps\winget.exe export -o <tmp>.json` 取包 ID（PATH 里没有 winget，必须全路径） | P0 | 本机样本导出 52 条 `PackageIdentifier`；生成的 json 可被 `json.load` 解析 |
-| M1-04 | winget list 全量枚举（含 MSIX 与 Source 列） | 解析 `winget list` 表格，保留 `Id` / `Version` / `Source` 三列；`MSIX\...` 形态的 Id 与空 Source 的 `ARP\...` 形态都要能落表 | P0 | 本机样本解析出 155 行；其中 `MSIX\` 前缀 72 行、Source 列为 `winget` 63 行；不含表头与分隔线 |
+| M1-04 | winget list 全量枚举（含 MSIX 与 Source 列） | 解析 `winget list` 表格，保留 `Id` / `Version` / `Source` 三列；`MSIX\...` 形态的 Id 与空 Source 的 `ARP\...` 形态都要能落表 | P0 | 本机样本**原始输出 155 行 / 数据行 153 行**（表头前有一个空行）；其中 `MSIX\` 前缀 72 行、Source 列为 `winget` 63 行；不含表头与分隔线 |
 | M1-05 | winget export + winget list 双路融合 | export 给精确 ID，list 给全量名称→ID 映射；两路取并集并按归一化名对齐，export 优先 | P0 | 本机样本 55 条中 **≥50 条**能关联到 winget 包 ID；export 的 52 个 ID 在 list 中 52/52 可命中 |
 | M1-06 | MSIX / Store 应用识别 | 识别 `winget list` 中 `MSIX\` 形态的条目（appx 家族名），标记 `source=msix`，不当作可下载项 | P0 | 本机样本识别出 72 条 MSIX/Store 应用；`source=msix` 条目在下载计划里一律 `skipped` 且 `detail` 写明「Store 应用走我的库」 |
 | M1-07 | 用户级 vs 机器级安装判定 | 依据注册表源（`HKCU` → user，`HKLM` → machine）与 `winget list` 中 `ARP\User\...` / `ARP\Machine\...` 标记，写出 `install_scope` 字段 | P0 | 输出中 `install_scope` 只允许 `user` / `machine` / `unknown`；本机样本 `ARP\User\` 与 `ARP\Machine\` 条目判定与注册表源一致率 100% |
@@ -81,9 +83,9 @@
 | 编号 | 功能点 | 说明 | 优先级 | 验收标准 |
 |---|---|---|---|---|
 | M3-01 | 账号注册 / 登录 | 用户名 + 密码注册与登录，密码只存 `salt + hash`，不存明文 | P0 | 注册后可登录拿到 token；数据库中检索不到明文密码（含日志） |
-| M3-02 | token 与设备绑定 | token 绑定 `(account_id, device_id)`；`device_id` 由服务端签发（⚠ 待 M0 定案：`04` 主张服务端签发、客户端自报可伪造；本文原写「客户端生成」） | P0 | 用 A 账号 token 携带 B 的 `device_id` 请求 → 403；token 无 `device_id` 声明 → 401 |
+| M3-02 | token 与设备绑定 | token 绑定 `(account_id, device_id)`；**`device_id` 由服务端签发**（客户端自报的 ID 可被伪造重放，不采用） | P0 | 用 A 账号 token 携带 B 的 `device_id` 请求 → **404**；token 无 `device_id` 声明 → 401 |
 | M3-03 | 清单按 (account_id, device_id) 隔离 | 资源键一律 `(account_id, device_id, ...)`，存储与查询都带这两个键 | P0 | 同一账号两台机器的清单互不可见：A 机 push 两版后，B 机 pull 拿到的是自己的版本 |
-| M3-04 | 越权拒绝 | 伪造他人 token、篡改 `account_id` / `device_id`、跨用户读写全部拒绝 | P0 | 负面测试矩阵（`04-isolation.md`）全部用例返回 401/403，**拦截率 100%** |
+| M3-04 | 越权拒绝 | 伪造他人 token、篡改 `account_id` / `device_id`、跨用户读写全部拒绝 | P0 | 负面测试矩阵（`04-isolation.md`）全部用例返回 401/404（**跨账号/跨设备一律 404，不用 403**），**拦截率 100%** |
 | M3-05 | 审计日志 | 记录每次认证、push、pull 的时间、`account_id`、`device_id`、来源 IP、结果 | P1 | 每条请求一条结构化日志；含账号/密码/token 的字段被掩码；可按 `account_id` 过滤 |
 | M3-06 | 配额 | 单账号清单条数上限、单账户最大机器数、请求体大小上限 | P1 | 超限返回 413/429 且给出明确错误码；单账号机器数超限时拒绝新 `device_id` |
 | M3-07 | 服务自启与存活 | systemd --user 单元 + `Linger=yes`（否则重启后不自启）；提供 `/healthz` | P0 | 重启 notebook 后 `systemctl --user is-active software-reback-cloud` 为 `active`；`curl /healthz` 返回 200 |
@@ -121,7 +123,7 @@
 | 1 | 重装前：`scan` 读三源注册表并过滤去重 | M1-01, M1-02, M1-08 | 本地 `software.json`（55 条） |
 | 2 | 采集 winget export 与 winget list，双路融合绑定 ID | M1-03, M1-04, M1-05, M1-06, M1-07 | 带 `winget_id` / `install_scope` 的清单（目标 ≥50 条可绑定） |
 | 3 | 写环境快照，输出 `schema_version: 2` | M1-10, M1-11 | v2 清单 |
-| 4 | 注册 / 登录，生成 `device_id` 并拿到绑定 token | M3-01, M3-02 | `(account_id, device_id)` token |
+| 4 | 注册 / 登录，**服务端签发 `device_id`** 并拿到绑定 token | M3-01, M3-02 | `(account_id, device_id)` token |
 | 5 | `cloud push` 上报清单，云端按双维度落库并写审计 | M3-03, M3-05 | 云端该机器最新一版清单 |
 | 6 | 重装 Windows（本工具不参与） | — | — |
 | 7 | 重装后：`cloud pull` 拉回清单 | M2-01, M3-04 | 本地 `software.json` |
@@ -134,7 +136,7 @@
 
 | 编号 | 指标 | 现状基线 | 目标 | 度量方式 |
 |---|---|---|---|---|
-| K1 | 清单识别覆盖率（55 条中能关联到 winget 包 ID 的比例） | 25%（14/55，仅名称匹配） | ≥90%（≥50/55） | 对同一台机器跑 `scan` → 统计 `winget_id` 非空条数 |
+| K1 | 清单识别覆盖率（55 条中能关联到 winget 包 ID 的比例） | 25%（14/55，仅名称匹配） | ≥90%（≥50/55）**且 `parse_errors == 0`** | 对同一台机器跑 `scan` → 同时统计 `winget_id` 非空条数**与** `stats.parse_errors`；两者都满足才算达标（见 `06-client.md` §2.4.1） |
 | K2 | 包 ID 解析率（已知可解析软件的 ID 完整率） | 52 条 export ID 可用 | export 的 52 条 100% 落入清单 | 对比 export 输出与清单的 `PackageIdentifier` 集合 |
 | K3 | 下载成功率（有来源条目） | 未统计（仅单机试跑） | ≥95%（预估，需 M3 完成后实测） | 报告中 `status=ok` / (`ok`+`failed`) |
 | K4 | 目录命中率（未解析条目被目录覆盖的比例） | 0（目录仍为示例） | ≥50%（预估，需 M4 运营后统计） | 人工清单条数 / 人工清单中在目录里有条目的条数 |

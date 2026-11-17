@@ -35,7 +35,9 @@
 ## 2. 响应包络与错误码
 
 成功：**`{"ok": true, "data": {...}, "error": null, "request_id": "<uuid4>"}`**
-失败：**`{"ok": false, "data": null, "error": {"code": "E_FORBIDDEN", "message": "设备不属于当前账号", "detail": {"field": "device_id", "resource": "device"}}, "request_id": "<uuid4>"}`**
+失败：**`{"ok": false, "data": null, "error": {"code": "E_NOT_FOUND", "message": "资源不存在或无权访问", "detail": {"resource": "inventory"}}, "request_id": "<uuid4>"}`**
+
+> **404/403 分工（M0 已定案）**：凡「按 ID 取某个资源」的路径，跨账号与不存在**共用 404 `E_NOT_FOUND`**，响应体逐字节一致；403 `E_FORBIDDEN` 只用于能力规则拒绝（无写权限、`jti` 归属不符）。理由见 `04-isolation.md` §3 的时序侧信道分析。
 
 | `code` | HTTP | 含义 | 客户端动作 |
 |---|---|---|---|
@@ -43,8 +45,8 @@
 | `E_TOKEN_EXPIRED` | 401 | `exp` 已过 | 重新登录（**不自动刷新**，见 3.1） |
 | `E_TOKEN_REVOKED` | 401 | `jti` 被吊销（logout 或强制下线） | 重新登录 |
 | `E_DEVICE_MISMATCH` | 401 | 请求体/路径的 `device_id` ≠ token 声明的 `did`（**同账号内**） | 修正 `device_id` 或重注册设备 |
-| `E_FORBIDDEN` | 403 | 资源不属于当前 `account_id`，或跨账号访问 | 不重试 |
-| `E_NOT_FOUND` | 404 | 资源不存在（**仅同账号内**；跨账号一律 `E_FORBIDDEN`，不用 404/403 差异泄漏存在性）⚠ **待 M0 定案**：`04-isolation.md` 主张跨账号一律返 **404** 以防枚举侧信道，两者语义相反，需择一 | 不重试 |
+| `E_FORBIDDEN` | 403 | **仅用于「已通过归属校验、但操作被能力规则拒绝」**：无 catalog 写权限、`jti` 不属于当前账号、`device_unbound`。**跨账号/跨设备访问资源一律不用 403**（见下行） | 不重试 |
+| `E_NOT_FOUND` | 404 | **资源不存在与无权访问共用此码**，响应体完全一致（防枚举侧信道）。跨账号、同账号跨设备、资源确实不存在，三者一律返回 404 `E_NOT_FOUND` | 不重试 |
 | `E_VALIDATION` | 400 | 参数非法（缺失/类型错/枚举越界/`items` 空或超限） | 修正请求，不自动重试 |
 | `E_IDEMPOTENCY_KEY_REQUIRED` | 400 | 写接口缺 `Idempotency-Key` | 补上重试 |
 | `E_IDEMPOTENCY_CONFLICT` | 409 | 同 key 但请求体不同 | 换新 key |
@@ -83,7 +85,7 @@
 | GET | `/audit/logs` | 查自己的操作日志 | 是 | 天然 |
 
 > 共 20 个端点。**没有** `/download/{id}` 文件流接口 —— 下载决策只返回 JSON（法律边界，见 02 文档第 8 节）。
-> 示例中 `account_id` 前缀为 `acc_`，与 `04-isolation.md` 的 `acct_` 不一致，⚠ **待 M0 统一定为 `acct_`**；仅示例可读性问题，不影响字段语义。
+> `account_id` 前缀统一为 **`acct_`**（与 `04-isolation.md` 一致）；`device_id` 前缀 `dev_`，`inventory_id` 前缀 `inv_`，`entry_id` 前缀 `cat_`。
 
 ### 3.1 为什么不提供 refresh token
 
@@ -100,19 +102,19 @@
 | 4.1 | `GET /health`（无认证） | — | 200 | `503 E_DEPENDENCY_UNAVAILABLE`（`db != ok`） |
 | 4.2 | `POST /accounts/register`（无认证） | `email` ≤254 唯一、`password` 10–128、`display_name` ≤64（默认 email 前缀） | 201 | `400 E_VALIDATION`、`409 E_CONFLICT`（`reason="email_taken"`）、`429 E_RATE_LIMITED` |
 | 4.3 | `POST /accounts/login`（无认证） | `email`、`password`、`device_id`、`device_label` | 200 | `401 E_UNAUTHENTICATED`（**不区分账号是否存在**）、`401 E_DEVICE_MISMATCH`、`429 E_RATE_LIMITED` |
-| 4.4 | `POST /accounts/logout` | `jti`、`all_devices` | 200 | `403 E_FORBIDDEN`（`jti` 不属于当前账号） |
+| 4.4 | `POST /accounts/logout` | `jti`、`all_devices` | 200 | `403 E_FORBIDDEN`（`jti` 不属于当前账号 —— 能力拒绝，非资源访问） |
 | 4.5 | `GET /accounts/me` | — | 200 | — |
 | 4.6 | `POST /devices/register` | 见下方示例 | 200 | `409 E_CONFLICT`（已属他人，**不泄漏对方账号**）、`429 E_QUOTA_EXCEEDED`、`400 E_VALIDATION` |
 | 4.7 | `GET /devices` | `limit,cursor` | 200 | — |
-| 4.8 | `POST /devices/{device_id}/heartbeat` | `agent_version`、`inventory_dirty` | 200 | `401 E_DEVICE_MISMATCH`、`403 E_FORBIDDEN` |
-| 4.9 | `DELETE /devices/{device_id}` | — | 200 | `403 E_FORBIDDEN` |
+| 4.8 | `POST /devices/{device_id}/heartbeat` | `agent_version`、`inventory_dirty` | 200 | `401 E_DEVICE_MISMATCH`、`404 E_NOT_FOUND`（设备不属于当前账号） |
+| 4.9 | `DELETE /devices/{device_id}` | — | 200 | `404 E_NOT_FOUND`（设备不属于当前账号） |
 | 4.10 | `POST /inventories`（核心） | 见 4.10 | 201 | `400 E_VALIDATION`、`400 E_SCHEMA_UNSUPPORTED`、`401 E_DEVICE_MISMATCH`、`409 E_IDEMPOTENCY_CONFLICT`、`413 E_PAYLOAD_TOO_LARGE`、`429 E_QUOTA_EXCEEDED`（版本 > 100） |
-| 4.11 | `GET /inventories`（核心） | `device_id`（必填）、`version`、`include_items`（默认 true）、`items_limit`（默认 500） | 200 | `403 E_FORBIDDEN`、`404 E_NOT_FOUND`（同账号无清单） |
-| 4.12 | `GET /inventories/{inventory_id}`、`GET /inventories/versions` | `device_id,limit,cursor` | 200 | `403 E_FORBIDDEN`、`404 E_NOT_FOUND` |
+| 4.11 | `GET /inventories`（核心） | `device_id`（必填）、`version`、`include_items`（默认 true）、`items_limit`（默认 500） | 200 | `404 E_NOT_FOUND`（同账号无清单 / `device_id` 不属于当前账号，两者不区分） |
+| 4.12 | `GET /inventories/{inventory_id}`、`GET /inventories/versions` | `device_id,limit,cursor` | 200 | `404 E_NOT_FOUND`（不存在、跨账号、跨设备三者一致） |
 | 4.13 | `GET /catalog/snapshot`（核心） | `If-None-Match`、`since_seq`、`limit` | 200 / **304** | `400 E_VALIDATION`（`since_seq` > 当前 `change_seq`） |
-| 4.14 | `GET /catalog/entries/{entry_id}`、`GET /catalog/lookup` | `display_name` | 200 | `404 E_NOT_FOUND`、`403 E_FORBIDDEN`（private 且非本人） |
+| 4.14 | `GET /catalog/entries/{entry_id}`、`GET /catalog/lookup` | `display_name` | 200 | `404 E_NOT_FOUND`（不存在或 private 且非本人，不区分） |
 | 4.15 | `POST /catalog/contributions`、`GET /catalog/contributions` | `key_hash`、`entry`、`scope`、`note` | 201 | `400 E_VALIDATION`（`url` 与 `winget_id` 都空；`sha256` 非 64 hex）、`409 E_CONFLICT`、`429 E_QUOTA_EXCEEDED`（> 50/天） |
-| 4.16 | `POST /catalog/resolve` | `device_id`、`items[]`（≤ 200） | 200 | `400 E_VALIDATION`、`403 E_FORBIDDEN` |
+| 4.16 | `POST /catalog/resolve` | `device_id`、`items[]`（≤ 200） | 200 | `400 E_VALIDATION`、`404 E_NOT_FOUND`（`device_id` 不属于当前账号） |
 | 4.17 | `GET /audit/logs` | `action,from,to,limit,cursor` | 200 | — |
 
 ### 4.1 ~ 4.9 请求与响应示例
@@ -126,7 +128,7 @@
 ```
 
 ```json
-{"request_id": "a1b2c3d4-0000-4000-8000-000000000002", "ok": true, "error": null, "data": {"account_id": "acc_01HQ2X3Y4Z5A6B7C8D9E0F1G2H", "email": "hdturk@example.com", "display_name": "hdturk", "role": "owner", "created_at": "2026-11-15T14:20:00Z"}}
+{"request_id": "a1b2c3d4-0000-4000-8000-000000000002", "ok": true, "error": null, "data": {"account_id": "acct_01HQ2X3Y4Z5A6B7C8D9E0F1G2H", "email": "hdturk@example.com", "display_name": "hdturk", "role": "owner", "created_at": "2026-11-15T14:20:00Z"}}
 ```
 
 **4.3 请求** → **响应 200**
@@ -136,7 +138,7 @@
 ```
 
 ```json
-{"request_id": "...", "ok": true, "error": null, "data": {"token": "<JWT>", "token_type": "Bearer", "expires_at": "2026-11-16T02:20:00Z", "account": {"account_id": "acc_01HQ2X3Y4Z5A6B7C8D9E0F1G2H", "email": "hdturk@example.com", "role": "owner"}, "device": {"device_id": "dev_7f3a9c21b4e5", "status": "active"}, "jti": "5c1f0e83-7a4b-4c39-9a10-2b6f7e8d9c01"}}
+{"request_id": "...", "ok": true, "error": null, "data": {"token": "<JWT>", "token_type": "Bearer", "expires_at": "2026-11-16T02:20:00Z", "account": {"account_id": "acct_01HQ2X3Y4Z5A6B7C8D9E0F1G2H", "email": "hdturk@example.com", "role": "owner"}, "device": {"device_id": "dev_7f3a9c21b4e5", "status": "active"}, "jti": "5c1f0e83-7a4b-4c39-9a10-2b6f7e8d9c01"}}
 ```
 
 服务端行为：① 按 `email` 取 `accounts`，`scrypt` 校验 `password_hash`，失败计数入库（5 次/15 分钟）；② 签发 HS256 JWT，claims 为 `{"iss":"software-reback-cloud","sub":"<account_id>","did":"<device_id>","jti":"<uuid4>","iat":...,"exp":...}`；③ **`tokens` 表只写 `sha256(raw_token)`、`jti`、`account_id`、`device_id`、`expires_at`，不落原文** —— 拖库或备份泄漏也拿不到可用凭证，服务端也无法「重新显示」token（02 文档 D9）；④ 返回给客户端的 `token` 是唯一一份原文。
@@ -148,7 +150,7 @@
 {"request_id": "...", "ok": true, "error": null, "data": {"revoked": 1, "deleted": 1, "revoked_tokens": 3, "device_id": "dev_7f3a9c21b4e5", "label": "ThinkPad-X1", "status": "active", "created": false, "first_seen_at": "2026-11-15T14:25:00Z", "last_seen_at": "2026-11-15T14:30:00Z", "server_time": "2026-11-15T14:30:00Z"}}
 ```
 
-**4.5** `{"request_id": "...", "ok": true, "error": null, "data": {"account_id": "acc_01HQ2X3Y4Z5A6B7C8D9E0F1G2H", "email": "hdturk@example.com", "display_name": "hdturk", "role": "owner", "device_count": 2, "capabilities": {"schema_max": 2, "catalog_incremental": true}, "quota": {"max_devices": 5, "max_inventories_per_device": 100, "max_items_per_inventory": 2000}}}`
+**4.5** `{"request_id": "...", "ok": true, "error": null, "data": {"account_id": "acct_01HQ2X3Y4Z5A6B7C8D9E0F1G2H", "email": "hdturk@example.com", "display_name": "hdturk", "role": "owner", "device_count": 2, "capabilities": {"schema_max": 2, "catalog_incremental": true}, "quota": {"max_devices": 5, "max_inventories_per_device": 100, "max_items_per_inventory": 2000}}}`
 
 **4.6 请求**（重装后指纹不变，是 `upsert`；首次 `created:true`）
 
@@ -209,7 +211,7 @@
 未变更 → `304 Not Modified`（无 body）；有变更 → `200` + `ETag: "catv12-3f8a1d2c"`。
 
 ```json
-{"request_id": "...", "ok": true, "error": null, "data": {"catalog_version": 12, "etag": "catv12-3f8a1d2c", "updated_at": "2026-11-15T13:00:00Z", "change_seq": 1487, "count": 3, "entries": [{"entry_id": "cat_01HQ9Z", "display_name": "微信", "normalized_name": "微信", "publisher": "Tencent", "url": "https://dldir1.qq.com/weixin/Windows/WeChatSetup.exe", "file_name": "WeChatSetup.exe", "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "winget_id": "", "silent_args": "/S", "architecture": "x64", "scope": "public", "status": "approved", "confidence": 0.95, "health": "healthy", "last_verified_at": "2026-11-14T20:00:00Z", "contributor_account_id": "acc_01HQ2X3Y4Z5A6B7C8D9E0F1G2H", "sources": ["manual"], "change_seq": 1487}, {"entry_id": "cat_01HQ9Y", "display_name": "NVIDIA App", "normalized_name": "nvidia app", "publisher": "NVIDIA", "url": "", "file_name": "", "sha256": "", "winget_id": "Nvidia.App", "silent_args": "-s", "architecture": "x64", "scope": "public", "status": "approved", "confidence": 0.9, "health": "healthy", "last_verified_at": "2026-11-10T00:00:00Z", "contributor_account_id": "acc_01HQ2X3Y4Z5A6B7C8D9E0F1G2H", "sources": ["winget_export", "manual"], "change_seq": 1466}, {"entry_id": "cat_01HQ9X", "display_name": "Office 专业增强版 2019", "normalized_name": "office 专业增强版 2019", "publisher": "Microsoft", "url": "https://example.com/office2019.img", "file_name": "office2019.img", "sha256": "", "winget_id": "", "silent_args": "/configure config.xml", "architecture": "x64", "scope": "private", "status": "pending", "confidence": 0.4, "health": "unknown", "last_verified_at": null, "contributor_account_id": "acc_01HQ2X3Y4Z5A6B7C8D9E0F1G2H", "sources": ["manual"], "change_seq": 1471}]}}
+{"request_id": "...", "ok": true, "error": null, "data": {"catalog_version": 12, "etag": "catv12-3f8a1d2c", "updated_at": "2026-11-15T13:00:00Z", "change_seq": 1487, "count": 3, "entries": [{"entry_id": "cat_01HQ9Z", "display_name": "微信", "normalized_name": "微信", "publisher": "Tencent", "url": "https://dldir1.qq.com/weixin/Windows/WeChatSetup.exe", "file_name": "WeChatSetup.exe", "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "winget_id": "", "silent_args": "/S", "architecture": "x64", "scope": "public", "status": "approved", "confidence": 0.95, "health": "healthy", "last_verified_at": "2026-11-14T20:00:00Z", "contributor_account_id": "acct_01HQ2X3Y4Z5A6B7C8D9E0F1G2H", "sources": ["manual"], "change_seq": 1487}, {"entry_id": "cat_01HQ9Y", "display_name": "NVIDIA App", "normalized_name": "nvidia app", "publisher": "NVIDIA", "url": "", "file_name": "", "sha256": "", "winget_id": "Nvidia.App", "silent_args": "-s", "architecture": "x64", "scope": "public", "status": "approved", "confidence": 0.9, "health": "healthy", "last_verified_at": "2026-11-10T00:00:00Z", "contributor_account_id": "acct_01HQ2X3Y4Z5A6B7C8D9E0F1G2H", "sources": ["winget_export", "manual"], "change_seq": 1466}, {"entry_id": "cat_01HQ9X", "display_name": "Office 专业增强版 2019", "normalized_name": "office 专业增强版 2019", "publisher": "Microsoft", "url": "https://example.com/office2019.img", "file_name": "office2019.img", "sha256": "", "winget_id": "", "silent_args": "/configure config.xml", "architecture": "x64", "scope": "private", "status": "pending", "confidence": 0.4, "health": "unknown", "last_verified_at": null, "contributor_account_id": "acct_01HQ2X3Y4Z5A6B7C8D9E0F1G2H", "sources": ["manual"], "change_seq": 1471}]}}
 ```
 
 增量响应（`since_seq` 模式）把 `entries` 换成 `upserts` + `deletions`：
@@ -218,7 +220,7 @@
 {"request_id": "...", "ok": true, "error": null, "data": {"catalog_version": 12, "etag": "catv12-3f8a1d2c", "updated_at": "2026-11-15T13:00:00Z", "from_seq": 1460, "to_seq": 1487, "upserts": [{"entry_id": "cat_01HQ9Z", "display_name": "微信", "status": "approved", "change_seq": 1487}], "deletions": [{"entry_id": "cat_01HQ7A", "change_seq": 1480}]}}
 ```
 
-规则：`private` 条目**只对 `contributor_account_id` 可见**（隔离，他人拿到 `entry_id` 也是 `403`）；`pending` 公共条目仍下发但客户端**默认不自动下载**（报告里列「待确认」）；`sources` 是派生字段（来自 `catalog_entry_sources`），不单独存。
+规则：`private` 条目**只对 `contributor_account_id` 可见**（隔离，他人拿到 `entry_id` 也是 **404 `E_NOT_FOUND`**，与「条目不存在」不可区分）；`pending` 公共条目仍下发但客户端**默认不自动下载**（报告里列「待确认」）；`sources` 是派生字段（来自 `catalog_entry_sources`），不单独存。
 
 **4.14 `GET /catalog/entries/{entry_id}` / `GET /catalog/lookup?display_name=...`** —— 单条结构同 4.13 的元素；lookup 归一化后精确匹配，未命中返回 `null` 而非 404（便于批量查询）。
 
@@ -252,7 +254,7 @@
 **4.17 `GET /audit/logs`** —— **只能查到 `account_id = sub` 的记录。**
 
 ```json
-{"request_id": "...", "ok": true, "error": null, "data": {"items": [{"log_id": 9123, "account_id": "acc_01HQ2X3Y4Z5A6B7C8D9E0F1G2H", "device_id": "dev_7f3a9c21b4e5", "action": "inventory.push", "target": "inv_01HQ3A4B5C6D7E8F9G0H1J2K3M", "result": "ok", "request_id": "a1b2c3d4-0000-4000-8000-000000000009", "created_at": "2026-11-15T14:26:12Z"}], "page": {"limit": 50, "next_cursor": null, "has_more": false}}}
+{"request_id": "...", "ok": true, "error": null, "data": {"items": [{"log_id": 9123, "account_id": "acct_01HQ2X3Y4Z5A6B7C8D9E0F1G2H", "device_id": "dev_7f3a9c21b4e5", "action": "inventory.push", "target": "inv_01HQ3A4B5C6D7E8F9G0H1J2K3M", "result": "ok", "request_id": "a1b2c3d4-0000-4000-8000-000000000009", "created_at": "2026-11-15T14:26:12Z"}], "page": {"limit": 50, "next_cursor": null, "has_more": false}}}
 ```
 
 `action` 枚举：`account.register` / `account.login` / `account.logout` / `device.register` / `device.delete` / `device.heartbeat` / `inventory.push` / `inventory.read` / `catalog.read` / `catalog.contribute` / `catalog.resolve` / `audit.read`。
@@ -267,7 +269,7 @@ PRAGMA cache_size = -16000;  -- 16MB，配合 100MB 内存预算
 
 -- 账号
 CREATE TABLE accounts (
-  account_id TEXT PRIMARY KEY,                  -- 'acc_' + ulid
+  account_id TEXT PRIMARY KEY,                  -- 'acct_' + ulid
   email TEXT NOT NULL COLLATE NOCASE,
   password_hash TEXT NOT NULL,                   -- scrypt$n$r$p$salt$hash，绝不存明文
   display_name TEXT NOT NULL DEFAULT '',
@@ -394,7 +396,7 @@ CREATE INDEX ix_audit_owner ON audit_logs(account_id, created_at DESC);
 | 校验 | SQL 谓词 |
 |---|---|
 | 账号归属 | `WHERE account_id = ?`（`?` = token `sub`） |
-| 设备归属 | `WHERE account_id = ? AND device_id = ?`，命中 0 行 → `E_FORBIDDEN` |
+| 设备归属 | `WHERE account_id = ? AND device_id = ?`，命中 0 行 → `E_NOT_FOUND`（404，不用 403） |
 | token 归属 | `WHERE token_sha256 = ? AND revoked_at IS NULL AND expires_at > ?` |
 | 私有目录隔离 | `WHERE (scope = 'public' AND status = 'approved') OR contributor_account_id = ?` |
 | 清单条目越权 | `WHERE account_id = ? AND device_id = ? AND inventory_id = ?` |

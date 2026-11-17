@@ -1,6 +1,6 @@
 # 04 隔离设计（M3）与越权自动验证
 
-> 归属：子任务 C。上游约束见 `PLAN-SPLIT.md`，接口契约见 `03-api-contract.md`（本文件不重复定义 JSON 字段，只引用）。
+> 归属：子任务 C。上游约束见 `PLAN-SPLIT.md`（**已归档**，仅引用其实测事实数据），接口契约见 `03-api-contract.md`（本文件不重复定义 JSON 字段，只引用）。
 > 一句话结论：**隔离不是「代码里记得加 `where`」，而是「不加 `where` 就查不出数据」**——用 SQLite 约束 + 统一 `assert_owned` + 35 条越权矩阵用例（+1 条并发用例）把越权堵死，且可一条命令复现。
 
 ## 0. 前提与不变量
@@ -30,6 +30,7 @@
 1. `INV-1` 任何业务 SQL 的 `WHERE` 必须同时含 `account_id = ?` 与（设备级资源）`device_id = ?`。
 2. `INV-2` 任何响应体不得包含不属于 token 上下文的 `account_id` / `device_id` / `storage_path`。
 3. `INV-3` 任何被拒请求（401/403/404/429）都必须先落审计、再返回响应。
+4. `INV-4` **跨账号与跨设备访问资源一律 404 `resource_not_found`，绝不用 403**；403 只保留给「能力规则拒绝」（无写权限、`jti` 归属不符、`device_unbound`）。
 
 ## 1. 威胁模型
 
@@ -77,7 +78,7 @@ ROOT = "__root__"   # 账号级资源（如账号信息）的 device 占位
 def assert_owned(conn, token_ctx, resource_type, resource_id, *, device_scope=None):
     ctx = require_token(conn, token_ctx)          # 层 1：401
     if resource_type in DEVICE_LEVEL:
-        require_device(ctx, device_scope)          # 403/400：token 的 device 必须匹配
+        require_device(ctx, device_scope)          # 403 device_mismatch（能力拒绝，不进业务表）
     row = RESOLVERS[resource_type](conn, resource_id, ctx.account_id)  # SQL 自带 account 条件
     if row is None:
         audit(conn, ctx, "deny", reason="not_found", res=resource_type, rid=resource_id)
@@ -217,10 +218,10 @@ def assert_owned(conn, token_ctx, resource_type, resource_id):
     if ctx is None:
         raise Unauthorized("invalid_token")          # 不区分：格式错 / 签名错 / 过期
 
-    # ② 再验设备：token 声明的 device 是否存在且属于该 account（403 不进业务表）
+    # ② 再验设备：token 声明的 device 是否存在且属于该 account（403 能力拒绝，不进业务表）
     if not device_belongs_to(conn, ctx.account_id, ctx.device_id):
         audit_deny(conn, ctx, "device_unbound", resource_type, resource_id)
-        raise Forbidden("device_unbound")
+        raise Forbidden("device_unbound")            # 403：token 自身不成立，与资源无关
 
     # ③ 再验资源归属：SQL 双条件，命中即「存在且在范围内」
     row = fetch_scoped(conn, resource_type, resource_id, ctx.account_id, ctx.device_id)
@@ -240,6 +241,7 @@ def assert_owned(conn, token_ctx, resource_type, resource_id):
 - 若先验资源归属再验设备：同账号下可以区分「资源存在但属于别设备」与「资源不存在」，泄露用户有几台机器。
 - 因此固定为「鉴权开销恒定 → 业务访问只发生在鉴权通过后 → 资源不存在与越权共用同一路径、同一错误码、同一 `Content-Length`」。
 - 落地要求：404 与 403 分支都**必须先写 `audit_log` 再返回**（避免「审计写盘时间」成为新的差异），审计写入与响应在同一事务提交点前后固定位置。
+- **403 的适用范围（M0 定案）**：403 只出现在「token 本身不成立」或「能力规则拒绝」两类，**不参与资源存在性判断**——因此它不会成为枚举预言机。一旦请求走到「按 ID 取资源」，无论资源属于他人还是根本不存在，一律 404 且响应逐字节一致。
 - 测试约束：B1/B2/B3 用例不只断言状态码，还断言**状态码分布一致 + 响应体字节长度一致**；时间差只在本地 loopback 上做「不超 15 倍中位数」的宽松断言（机器抖动大，硬卡耗时会 flaky）。
 
 ## 4. 越权验证用例矩阵（核心）
@@ -262,7 +264,7 @@ def assert_owned(conn, token_ctx, resource_type, resource_id):
 | N2 | 跨账号覆盖清单 | `inv_b1` 存在 | `PUT /v1/inventory/inv_b1`，`token(A,dev_a1)` | 404 | `status==404`；`SELECT payload_json FROM inventory WHERE inventory_id='inv_b1'` 与请求前**逐字节相同**；`seq` 未变 |
 | N3 | 跨账号列举 | — | `GET /v1/accounts/acct_b/inventories`，`token(A,dev_a1)` | 404 | `status==404`；`error.code=="resource_not_found"`；响应不含 `acct_b` |
 | D1 | 跨设备读（同账号） | `inv_a2` 属 `dev_a2` | `GET /v1/inventory/inv_a2`，`token(A,dev_a1)` | 404 | `status==404`；`error.code=="resource_not_found"`；与 N1 的**状态码与 `error.code` 完全一致** |
-| D2 | 跨设备列举 | `dev_a2` 存在 | `GET /v1/inventory?device_id=dev_a2`，`token(A,dev_a1)` | 403 | `status==403`；`error.code=="device_mismatch"`（同账号可见，允许区分） |
+| D2 | 跨设备列举 | `dev_a2` 存在 | `GET /v1/inventory?device_id=dev_a2`，`token(A,dev_a1)` | 403 | `status==403`；`error.code=="device_mismatch"`（**能力拒绝：查询参数与 token 不符，不涉及资源存在性**） |
 | D3 | 请求体塞他人 device_id | `token(A,dev_a1)` | `POST /v1/inventory`，body 含 `{"device_id":"dev_a2", ...}` | 2xx 但写入 `dev_a1` | 响应 `device_id=="dev_a1"`；DB `SELECT count(*) FROM inventory WHERE device_id='dev_a2'` 不增加；body 里的 `dev_a2` 不出现在任何行 |
 | D4 | 批量上报混入他人资源 | `token(A,dev_a1)` | `POST /v1/inventories/batch`，items 里 1 条正常 + 1 条 `device_id=dev_b1` | 400，整批不落库 | `status==400`；`error.code=="body_device_mismatch"`；`inventory` 行数不变（批处理必须全成功或全失败） |
 | D5 | 设备指纹不合规 | — | 上报 body `device_id` = `../../etc/passwd` | 400 或 2xx 覆盖 | 若覆盖：响应 `device_id` 形如 `^dev_[0-9a-f]{24}$`；若拒绝：`error.code=="invalid_device_id"`；客户端落盘路径不含 `..` |
@@ -298,11 +300,13 @@ def assert_owned(conn, token_ctx, resource_type, resource_id):
 | 403 | `device_unbound` | —（层 2 步②） | token 的 device 不属于该 account |
 | 403 | `device_mismatch` | D2 | 查询参数 `device_id` 与 token 不一致 |
 | 403 | `forbidden` | K1 | 无 catalog 写权限 |
-| 404 | `resource_not_found` | N1–N3、D1、B1、B2 | 不存在与无权访问共用 |
+| 404 | `resource_not_found` | N1–N3、D1、B1、B2 | 不存在与无权访问共用（**跨账号、跨设备、真不存在三者完全一致**） |
 | 400 | `body_device_mismatch` | D4 | 批量上报混入其他设备 |
 | 400 | `invalid_device_id` | D5 | 形态不合规 |
 | 400 | `unsafe_url_scheme` / `unsafe_url_host` | K1–K4 | catalog URL 校验 |
 | 409 | `nonce_replayed` / `stale_seq` | R1、R2 | 重放与旧序号 |
+
+> **403 的边界（M0 已定案）**：`device_unbound` / `device_mismatch` / `forbidden` 三个 403 都**不是**「资源访问被拒」，而是「token 本身或操作能力不成立」。一旦进入「按 ID 取资源」的路径，无论资源属于他人还是不存在，一律 404。这与 `03-api-contract.md` §2 的错误码表逐条对齐。
 
 ## 5. 自动化验证方案
 
@@ -473,7 +477,8 @@ python -m coverage report --fail-under=90
 - [ ] 隔离用例在「服务未常驻」环境下可跑：全部自建进程内服务端（`127.0.0.1` 随机端口），不读 notebook 的 8084
 - [ ] 服务不可达时客户端**失败关闭**（报错退出，不回落到缓存清单或空账号目录）
 - [ ] 跨账号读/写/列举一律 **404 `resource_not_found`**，响应体不含目标资源 ID 与任何他人软件名
-- [ ] 同账号跨设备读其清单 → 404；`?device_id=` 与 token 不符 → 403 `device_mismatch`
+- [ ] 同账号跨设备读其清单 → 404；`?device_id=` 与 token 不符 → 403 `device_mismatch`（**能力拒绝，非资源访问**）
+- [ ] **403 从不用于资源存在性判断**：`INV-4` 通过，`04` §4 错误码表与 `03` §2 逐条一致
 - [ ] 请求体携带的 `device_id` **永不生效**（D3 断言 DB 中该设备行数不变）
 - [ ] 401 的五个错误码（`token_missing` / `token_malformed` / `token_bad_signature` / `token_expired` / `token_revoked`）可区分
 - [ ] `auth_session` 只有 `token_hash` 列，`SELECT token_hash FROM auth_session` 无 `tok_` 前缀明文；服务端日志中 `Authorization` 已脱敏
@@ -484,7 +489,7 @@ python -m coverage report --fail-under=90
 - [ ] 50 线程并发写入后逐条校验归属，无串数据、无 `database is locked`
 - [ ] `coverage report --fail-under=90` 通过，`authz.py` 行覆盖 100%
 - [ ] README 增补「隔离如何自证」一节，指向本文件与上述命令
-- [ ] `PLAN-SPLIT.md` 第 12 行「隔离强度」一行可被直接引用：伪造 token / 篡改 ID / 跨用户读写 → 全部拒绝，且由上述 35 条矩阵用例 + 并发用例证明
+- [ ] `PLAN-SPLIT.md`「已确认的前提」表中「隔离强度」一行可被直接引用：伪造 token / 篡改 ID / 跨用户读写 → 全部拒绝，且由上述 35 条矩阵用例 + 并发用例证明
 
 ## 7. 不做什么（范围外）
 
